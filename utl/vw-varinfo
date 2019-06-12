@@ -286,7 +286,7 @@ sub read_features($) {
 
     my $ts;
     if ($trainset =~ /\.gz$/) {
-        open($ts, "zcat $trainset|") || die "$0: zcat $trainset|: $!\n";
+        open($ts, "gunzip -c $trainset|") || die "$0: gunzip -c $trainset|: $!\n";
     } else {
         open($ts, $trainset) || die "$0: $trainset: $!\n";
     }
@@ -322,7 +322,7 @@ sub read_features($) {
 
             # Trim (the optionally empty) name-space prefix,
             # including the optional :weight
-            $nsr =~ s/^$ns\S*\s*//;
+            $nsr =~ s/^\Q$ns\E\S*\s*//;
 
             # Following the name-space: loop over feature+value pairs:
             foreach my $keyval (split(/\s+/, $nsr)) {
@@ -369,7 +369,7 @@ sub do_train($$) {
     my ($trainset, $model) = @_;
     my $cmd = "$VW --quiet $VWARGS";
     unless ($cmd =~ /(?:\s(?:-d|--data)\s)/) {
-        $cmd .= " $trainset";
+        $cmd .= " -d $trainset";
     }
     unless ($cmd =~ /(?:\s(?:-f|--final_regressor))/) {
         $cmd .= " -f $model";
@@ -497,7 +497,7 @@ sub audit_features {
     my $vw_audit_args = "--quiet -t --audit -i $ModelFile -d $ExampleFile";
     my $vw_mcargs = '';
     if (${VWARGS} =~ /--(?:(?:cs)?oaa|wap|sequence)(?:_ldf)?\s+\d+/) {
-        $vw_mcargs = $&;
+#        $vw_mcargs = $&;
     }
     my $audit_cmd = "$VW $vw_mcargs $vw_audit_args";
     $audit_cmd .= "|tee $AuditFile" if ($opt_K);
@@ -617,6 +617,11 @@ sub print_feature_report($$$$@) {
         if ($opt_O =~ /^a/i) {
             $normalized_score = abs($normalized_score);
         }
+
+        # On the fly generated (e.g. -q crossed features) don't have a min/max
+        $FeatureMin{$f} = 0 unless (exists $FeatureMin{$f});
+        $FeatureMax{$f} = 0 unless (exists $FeatureMax{$f});
+
         printf "%-*s\t%10u %8.2f %8.2f %+9.4f %9.2f%%\n",
                 $max_flen, $f,
                 $Feature2Hash{$f},

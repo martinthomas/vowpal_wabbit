@@ -3,12 +3,6 @@ Copyright (c) by respective owners including Yahoo!, Microsoft, and
 individual contributors. All rights reserved.  Released under a BSD
 license as described in the file LICENSE.
  */
-
-#include <math.h>
-#include <iostream>
-#include <fstream>
-#include <float.h>
-#include <time.h>
 #ifdef _WIN32
 #include <WinSock2.h>
 #else
@@ -16,94 +10,151 @@ license as described in the file LICENSE.
 #include <arpa/inet.h>
 #endif
 #include <sys/timeb.h>
-#include "global_data.h"
-#include "parse_example.h"
 #include "parse_args.h"
+#include "parse_regressor.h"
 #include "accumulate.h"
-#include "vw.h"
-#include "searn.h"
+#include "best_constant.h"
+#include "vw_exception.h"
+#include <fstream>
+
+#include "options.h"
+#include "options_boost_po.h"
 
 using namespace std;
+using namespace VW::config;
 
-int main(int argc, char *argv[])
+vw* setup(options_i& options)
 {
-  vw *all = parse_args(argc, argv);
-  struct timeb t_start, t_end;
-  ftime(&t_start);
-  
-  if (!all->quiet && !all->bfgs && !all->searn)
-    {
-      const char * header_fmt = "%-10s %-10s %10s %11s %8s %8s %8s\n";
-      fprintf(stderr, header_fmt,
-	      "average", "since", "example", "example",
-	      "current", "current", "current");
-      fprintf(stderr, header_fmt,
-	      "loss", "last", "counter", "weight", "label", "predict", "features");
-      cerr.precision(5);
-    }
+  vw* all = nullptr;
+  try
+  {
+    all = VW::initialize(options);
+  }
+  catch (const exception& ex)
+  {
+    cout << ex.what() << endl;
+    throw;
+  }
+  catch (...)
+  {
+    cout << "unknown exception" << endl;
+    throw;
+  }
+  all->vw_is_main = true;
 
-  VW::start_parser(*all);
-
-  all->l->driver(all);
-
-  VW::end_parser(*all);
-
-  ftime(&t_end);
-  double net_time = (int) (1000.0 * (t_end.time - t_start.time) + (t_end.millitm - t_start.millitm)); 
-  if(!all->quiet && all->span_server != "")
-    cerr<<"Net time taken by process = "<<net_time/(double)(1000)<<" seconds\n";
-
-  if(all->span_server != "") {
-    float loss = (float)all->sd->sum_loss;
-    all->sd->sum_loss = (double)accumulate_scalar(*all, all->span_server, loss);
-    float weighted_examples = (float)all->sd->weighted_examples;
-    all->sd->weighted_examples = (double)accumulate_scalar(*all, all->span_server, weighted_examples);
-    float weighted_labels = (float)all->sd->weighted_labels;
-    all->sd->weighted_labels = (double)accumulate_scalar(*all, all->span_server, weighted_labels);
-    float weighted_unlabeled_examples = (float)all->sd->weighted_unlabeled_examples;
-    all->sd->weighted_unlabeled_examples = (double)accumulate_scalar(*all, all->span_server, weighted_unlabeled_examples);
-    float example_number = (float)all->sd->example_number;
-    all->sd->example_number = (uint64_t)accumulate_scalar(*all, all->span_server, example_number);
-    float total_features = (float)all->sd->total_features;
-    all->sd->total_features = (uint64_t)accumulate_scalar(*all, all->span_server, total_features);
+  if (!all->quiet && !all->bfgs && !all->searchstr && !options.was_supplied("audit_regressor"))
+  {
+    all->trace_message << std::left << std::setw(shared_data::col_avg_loss) << std::left << "average"
+                       << " " << std::setw(shared_data::col_since_last) << std::left << "since"
+                       << " " << std::right << std::setw(shared_data::col_example_counter) << "example"
+                       << " " << std::setw(shared_data::col_example_weight) << "example"
+                       << " " << std::setw(shared_data::col_current_label) << "current"
+                       << " " << std::setw(shared_data::col_current_predict) << "current"
+                       << " " << std::setw(shared_data::col_current_features) << "current" << std::endl;
+    all->trace_message << std::left << std::setw(shared_data::col_avg_loss) << std::left << "loss"
+                       << " " << std::setw(shared_data::col_since_last) << std::left << "last"
+                       << " " << std::right << std::setw(shared_data::col_example_counter) << "counter"
+                       << " " << std::setw(shared_data::col_example_weight) << "weight"
+                       << " " << std::setw(shared_data::col_current_label) << "label"
+                       << " " << std::setw(shared_data::col_current_predict) << "predict"
+                       << " " << std::setw(shared_data::col_current_features) << "features" << std::endl;
   }
 
-  float weighted_labeled_examples = (float)(all->sd->weighted_examples - all->sd->weighted_unlabeled_examples);
-  float best_constant = (float)((all->sd->weighted_labels - all->initial_t) / weighted_labeled_examples);
-  float constant_loss = (best_constant*(1.0f - best_constant)*(1.0f - best_constant)
-			 + (1.0f - best_constant)*best_constant*best_constant);
-  
-  if (!all->quiet)
-    {
-      cerr.precision(6);
-      cerr << endl << "finished run";
-      if(all->current_pass == 0)
-        cerr << endl << "number of examples = " << all->sd->example_number;
-      else{
-        cerr << endl << "number of examples per pass = " << all->sd->example_number / all->current_pass;
-        cerr << endl << "passes used = " << all->current_pass;
-      }
-      cerr << endl << "weighted example sum = " << all->sd->weighted_examples;
-      cerr << endl << "weighted label sum = " << all->sd->weighted_labels;
-      if(all->holdout_set_off)
-      {
-        cerr << endl << "average loss = " << all->sd->sum_loss / all->sd->weighted_examples;
-      }  
-      else
-      {
-        cerr << endl << "average loss = " << all->sd->holdout_best_loss << " h";
-      }
-      cerr << endl << "best constant = " << best_constant;
-      if (all->sd->min_label == 0. && all->sd->max_label == 1. && best_constant < 1. && best_constant > 0.)
-	cerr << endl << "best constant's loss = " << constant_loss;
-      cerr << endl << "total feature number = " << all->sd->total_features;
-      if (all->active_simulation)
-	cerr << endl << "total queries = " << all->sd->queries << endl;
-      cerr << endl;
-    }
-  
-  VW::finish(*all);
-  
-  return 0;
+  return all;
 }
 
+int main(int argc, char* argv[])
+{
+  bool should_use_onethread = false;
+  option_group_definition driver_config("driver");
+  driver_config.add(make_option("onethread", should_use_onethread).help("Disable parse thread"));
+
+  try
+  {
+    // support multiple vw instances for training of the same datafile for the same instance
+    vector<std::unique_ptr<options_boost_po>> arguments;
+    vector<vw*> alls;
+    if (argc == 3 && !strcmp(argv[1], "--args"))
+    {
+      std::fstream arg_file(argv[2]);
+
+      int line_count = 1;
+      std::string line;
+      while (std::getline(arg_file, line))
+      {
+        std::stringstream sstr;
+        sstr << line << " -f model." << (line_count++);
+        sstr << " --no_stdin";  // can't use stdin with multiple models
+
+        std::cout << sstr.str() << endl;
+        string str = sstr.str();
+        const char* new_args = str.c_str();
+
+        int l_argc;
+        char** l_argv = VW::get_argv_from_string(new_args, l_argc);
+
+        std::unique_ptr<options_boost_po> ptr(new options_boost_po(argc, argv));
+        ptr->add_and_parse(driver_config);
+        alls.push_back(setup(*ptr.get()));
+        arguments.push_back(std::move(ptr));
+      }
+    }
+    else
+    {
+      std::unique_ptr<options_boost_po> ptr(new options_boost_po(argc, argv));
+      ptr->add_and_parse(driver_config);
+      alls.push_back(setup(*ptr.get()));
+      arguments.push_back(std::move(ptr));
+    }
+
+    vw& all = *alls[0];
+
+    // struct timeb t_start, t_end;
+    // ftime(&t_start);
+
+    if (should_use_onethread)
+    {
+      if (alls.size() == 1)
+        LEARNER::generic_driver_onethread(all);
+      else
+        throw "--onethread doesn't make sense with multiple learners";
+    }
+    else
+    {
+      VW::start_parser(all);
+      if (alls.size() == 1)
+        LEARNER::generic_driver(all);
+      else
+        LEARNER::generic_driver(alls);
+      VW::end_parser(all);
+    }
+
+    for (vw* v : alls)
+    {
+      if (v->p->exc_ptr)
+      {
+        std::rethrow_exception(v->p->exc_ptr);
+      }
+
+      VW::sync_stats(*v);
+      VW::finish(*v);
+    }
+  }
+  catch (VW::vw_exception& e)
+  {
+    cerr << "vw (" << e.Filename() << ":" << e.LineNumber() << "): " << e.what() << endl;
+    exit(1);
+  }
+  catch (exception& e)
+  {
+    // vw is implemented as a library, so we use 'throw runtime_error()'
+    // error 'handling' everywhere.  To reduce stderr pollution
+    // everything gets caught here & the error message is printed
+    // sans the excess exception noise, and core dump.
+    cerr << "vw: " << e.what() << endl;
+    // cin.ignore();
+    exit(1);
+  }
+  // cin.ignore();
+  return 0;
+}

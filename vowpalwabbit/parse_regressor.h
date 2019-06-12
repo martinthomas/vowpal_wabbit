@@ -3,26 +3,18 @@ Copyright (c) by respective owners including Yahoo!, Microsoft, and
 individual contributors. All rights reserved.  Released under a BSD
 license as described in the file LICENSE.
  */
-#ifndef PR_H
-#define PR_H
-
+#pragma once
 #include <string>
-#include "loss_functions.h"
-#include "boost/program_options.hpp"
 #include "global_data.h"
+#include "options.h"
 
-namespace po = boost::program_options;
-
-using namespace std;
-
-void parse_regressor_args(vw& all, po::variables_map& vm, io_buf& io_temp);
+void read_regressor_file(vw& all, std::vector<std::string> files, io_buf& io_temp);
 
 void finalize_regressor(vw& all, std::string reg_name);
 void initialize_regressor(vw& all);
 
 void save_predictor(vw& all, std::string reg_name, size_t current_pass);
-void save_load_header(vw& all, io_buf& model_file, bool read, bool text);
+void save_load_header(
+    vw& all, io_buf& model_file, bool read, bool text, std::string& file_options, VW::config::options_i& options);
 
-void parse_mask_regressor_args(vw& all, po::variables_map& vm);
-
-#endif
+void parse_mask_regressor_args(vw& all, std::string feature_mask, std::vector<std::string> initial_regressors);

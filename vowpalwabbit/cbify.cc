@@ -1,388 +1,513 @@
 #include <float.h>
-#include "oaa.h"
-#include "vw.h"
-#include "csoaa.h"
-#include "cb.h"
+#include "reductions.h"
+#include "cb_algs.h"
 #include "rand48.h"
 #include "bs.h"
+#include "vw.h"
+#include "hash.h"
+#include "explore.h"
+
+#include <vector>
 
 using namespace LEARNER;
+using namespace exploration;
+using namespace ACTION_SCORE;
+// using namespace COST_SENSITIVE;
+using namespace std;
+using namespace VW::config;
 
-namespace CBIFY {
+struct cbify;
 
-  struct cbify {
-    size_t k;
-    
-    size_t tau;
+struct cbify_adf_data
+{
+  multi_ex ecs;
+  size_t num_actions;
+};
 
-    float epsilon;
+struct cbify
+{
+  CB::label cb_label;
+  uint64_t app_seed;
+  action_scores a_s;
+  // used as the seed
+  size_t example_counter;
+  vw* all;
+  bool use_adf;  // if true, reduce to cb_explore_adf instead of cb_explore
+  cbify_adf_data adf_data;
+  float loss0;
+  float loss1;
 
-    size_t counter;
+  // for ldf inputs
+  std::vector<v_array<COST_SENSITIVE::wclass>> cs_costs;
+  std::vector<v_array<CB::cb_class>> cb_costs;
+  std::vector<ACTION_SCORE::action_scores> cb_as;
+};
 
-    size_t bags;
-    v_array<float> count;
-    v_array<uint32_t> predictions;
-    
-    CB::label cb_label;
-    CSOAA::label cs_label;
-    CSOAA::label second_cs_label;
+float loss(cbify& data, uint32_t label, uint32_t final_prediction)
+{
+  if (label != final_prediction)
+    return data.loss1;
+  else
+    return data.loss0;
+}
 
-    learner* cs;
-    vw* all;
-  };
-  
-  uint32_t do_uniform(cbify& data)
-  {  //Draw an action
-    return (uint32_t)ceil(frand48() * data.k);
-  }
-
-  uint32_t choose_bag(cbify& data)
-  {  //Draw an action
-    return (uint32_t)floor(frand48() * data.bags);
-  }
-
-  float loss(uint32_t label, float final_prediction)
+float loss_cs(cbify& data, v_array<COST_SENSITIVE::wclass>& costs, uint32_t final_prediction)
+{
+  float cost = 0.;
+  for (auto wc : costs)
   {
-    if (label != final_prediction)
-      return 1.;
-    else
-      return 0.;
-  }
-
-  template <bool is_learn>
-  void predict_or_learn_first(cbify& data, learner& base, example& ec)
-  {//Explore tau times, then act according to optimal.
-    OAA::mc_label* ld = (OAA::mc_label*)ec.ld;
-    //Use CB to find current prediction for remaining rounds.
-    if (data.tau && is_learn > 0)
-      {
-	ec.final_prediction = do_uniform(data);
-	ec.loss = loss(ld->label, ec.final_prediction);
-	data.tau--;
-	uint32_t action = (uint32_t)ec.final_prediction;
-	CB::cb_class l = {ec.loss, action, 1.f / data.k};
-	data.cb_label.costs.erase();
-	data.cb_label.costs.push_back(l);
-	ec.ld = &(data.cb_label);
-	base.learn(ec);
-	ec.final_prediction = (float)action;
-	ec.loss = l.cost;
-      }
-    else
-      {
-	data.cb_label.costs.erase();
-	ec.ld = &(data.cb_label);
-	base.predict(ec);
-	ec.loss = loss(ld->label, ec.final_prediction);
-      }
-    ec.ld = ld;
-  }
-  
-  template <bool is_learn>
-  void predict_or_learn_greedy(cbify& data, learner& base, example& ec)
-  {//Explore uniform random an epsilon fraction of the time.
-    OAA::mc_label* ld = (OAA::mc_label*)ec.ld;
-    ec.ld = &(data.cb_label);
-    data.cb_label.costs.erase();
-    
-    base.predict(ec);
-    uint32_t action = (uint32_t)ec.final_prediction;
-
-    float base_prob = data.epsilon / data.k;
-    if (frand48() < 1. - data.epsilon)
-      {
-	CB::cb_class l = {loss(ld->label, ec.final_prediction), 
-			  action, 1.f - data.epsilon + base_prob};
-	data.cb_label.costs.push_back(l);
-      }
-    else
-      {
-	action = do_uniform(data);
-	CB::cb_class l = {loss(ld->label, action), 
-			  action, base_prob};
-	if (action == ec.final_prediction)
-	  l.probability = 1.f - data.epsilon + base_prob;
-	data.cb_label.costs.push_back(l);
-      }
-
-    if (is_learn)
-      base.learn(ec);
-    
-    ec.final_prediction = (float)action;
-    ec.loss = loss(ld->label, ec.final_prediction);
-    ec.ld = ld;
-  }
-
-  template <bool is_learn>
-  void predict_or_learn_bag(cbify& data, learner& base, example& ec)
-  {//Randomize over predictions from a base set of predictors
-    //Use CB to find current predictions.
-    OAA::mc_label* ld = (OAA::mc_label*)ec.ld;
-    ec.ld = &(data.cb_label);
-    data.cb_label.costs.erase();
-
-    for (size_t j = 1; j <= data.bags; j++)
-       data.count[j] = 0;
-	 
-    size_t bag = choose_bag(data);
-    size_t action = 0;
-    for (size_t i = 0; i < data.bags; i++)
-      {
-	base.predict(ec,i);
-	data.count[ec.final_prediction]++;
-	if (i == bag)
-	  action = ec.final_prediction;
-      }
-    assert(action != 0);
-    if (is_learn)
-      {
-	float probability = (float)data.count[action] / (float)data.bags;
-	CB::cb_class l = {loss(ld->label, action), 
-			  action, probability};
-	data.cb_label.costs.push_back(l);
-	for (size_t i = 0; i < data.bags; i++)
-	  {
-	    uint32_t count = BS::weight_gen();
-	    for (uint32_t j = 0; j < count; j++)
-	      base.learn(ec,i);
-	  }
-      }
-    ec.ld = ld;
-    ec.final_prediction = action;
-  }
-  
-  uint32_t choose_action(v_array<float>& distribution)
-  {
-    float value = frand48();
-    for (uint32_t i = 0; i < distribution.size();i++)
-      {
-	if (value <= distribution[i])
-	  return i+1;	    
-	else
-	  value -= distribution[i];
-      }
-    //some rounding problem presumably.
-    return 1;
-  }
-  
-  void safety(v_array<float>& distribution, float min_prob)
-  {
-    float added_mass = 0.;
-    for (uint32_t i = 0; i < distribution.size();i++)
-      if (distribution[i] > 0 && distribution[i] <= min_prob)
-	{
-	  added_mass += min_prob - distribution[i];
-	  distribution[i] = min_prob;
-	}
-    
-    float ratio = 1. / (1. + added_mass);
-    if (ratio < 0.999)
-      {
-	for (uint32_t i = 0; i < distribution.size(); i++)
-	  if (distribution[i] > min_prob)
-	    distribution[i] = distribution[i] * ratio; 
-	safety(distribution, min_prob);
-      }
-  }
-
-  void gen_cs_label(vw& all, CB::cb_class& known_cost, example& ec, CSOAA::label& cs_ld, uint32_t label)
-  {
-    CSOAA::wclass wc;
-    
-    //get cost prediction for this label
-    wc.x = CB::get_cost_pred<false>(all, &known_cost, ec, label, all.sd->k);
-    wc.weight_index = label;
-    wc.partial_prediction = 0.;
-    wc.wap_value = 0.;
-    
-    //add correction if we observed cost for this action and regressor is wrong
-    if( known_cost.action == label ) 
-      wc.x += (known_cost.cost - wc.x) / known_cost.probability;
-    
-    cs_ld.costs.push_back( wc );
-  }
-
-  template <bool is_learn>
-  void predict_or_learn_cover(cbify& data, learner& base, example& ec)
-  {//Randomize over predictions from a base set of predictors
-    //Use cost sensitive oracle to cover actions to form distribution.
-    OAA::mc_label* ld = (OAA::mc_label*)ec.ld;
-    data.counter++;
-
-    data.count.erase();
-    data.cs_label.costs.erase();
-    for (size_t j = 0; j < data.k; j++)
-      {
-	data.count.push_back(0);
-
-	CSOAA::wclass wc;
-	
-	//get cost prediction for this label
-	wc.x = FLT_MAX;
-	wc.weight_index = j+1;
-	wc.partial_prediction = 0.;
-	wc.wap_value = 0.;
-	data.cs_label.costs.push_back(wc);
-      }
-
-    float additive_probability = 1. / (float)data.bags;
-
-    ec.ld = &data.cs_label;
-    for (size_t i = 0; i < data.bags; i++)
-      { //get predicted cost-sensitive predictions
-	if (i == 0)
-	  data.cs->predict(ec, i);
-	else
-	  data.cs->predict(ec,i+1);
-	data.count[ec.final_prediction-1] += additive_probability;
-	data.predictions[i] = ec.final_prediction;
-      }
-
-    float min_prob = data.epsilon * min (1. / data.k, 1. / sqrt(data.counter * data.k));
-    
-    safety(data.count, min_prob);
-    
-    //compute random action
-    uint32_t action = choose_action(data.count);
-    
-    if (is_learn)
-      {
-	data.cb_label.costs.erase();
-	float probability = (float)data.count[action-1];
-	CB::cb_class l = {loss(ld->label, action), 
-			  action, probability};
-	data.cb_label.costs.push_back(l);
-	ec.ld = &(data.cb_label);
-	base.learn(ec);
-
-	//Now update oracles
-	
-	//1. Compute loss vector
-	data.cs_label.costs.erase();
-	float norm = min_prob * data.k;
-	for (uint32_t j = 0; j < data.k; j++)
-	  { //data.cs_label now contains an unbiased estimate of cost of each class.
-	    gen_cs_label(*data.all, l, ec, data.cs_label, j+1);
-	    data.count[j] = 0;
-	  }
-	
-	ec.ld = &data.second_cs_label;
-	//2. Update functions
-	for (size_t i = 0; i < data.bags; i++)
-	  { //get predicted cost-sensitive predictions
-	    for (size_t j = 0; j < data.k; j++)
-	      {
-		float pseudo_cost = data.cs_label.costs[j].x - data.epsilon * min_prob / (max(data.count[j], min_prob) / norm) + 1;
-		data.second_cs_label.costs[j].weight_index = j+1;
-		data.second_cs_label.costs[j].x = pseudo_cost;
-	      }
-	    if (i != 0)
-	      data.cs->learn(ec,i+1);
-	    if (data.count[data.predictions[i]-1] < min_prob)
-	      norm += max(0, additive_probability - (min_prob - data.count[data.predictions[i]-1]));
-	    else
-	      norm += additive_probability;
-	    data.count[data.predictions[i]-1] += additive_probability;
-	  }
-      }
-
-    ec.ld = ld;
-    ec.final_prediction = action;
-  }
-  
-  void init_driver(cbify&) {}
-
-  void finish_example(vw& all, cbify&, example& ec)
-  {
-    OAA::output_example(all, ec);
-    VW::finish_example(all, &ec);
-  }
-
-  learner* setup(vw& all, std::vector<std::string>&opts, po::variables_map& vm, po::variables_map& vm_file)
-  {//parse and set arguments
-    cbify* data = (cbify*)calloc(1, sizeof(cbify));
-
-    data->epsilon = 0.05f;
-    data->counter = 0;
-    data->tau = 1000;
-    data->all = &all;
-    po::options_description desc("CBIFY options");
-    desc.add_options()
-      ("first", po::value<size_t>(), "tau-first exploration")
-      ("epsilon",po::value<float>() ,"epsilon-greedy exploration")
-      ("bag",po::value<size_t>() ,"bagging-based exploration")
-      ("cover",po::value<size_t>() ,"bagging-based exploration");
-    
-    po::parsed_options parsed = po::command_line_parser(opts).
-      style(po::command_line_style::default_style ^ po::command_line_style::allow_guessing).
-      options(desc).allow_unregistered().run();
-    opts = po::collect_unrecognized(parsed.options, po::include_positional);
-    po::store(parsed, vm);
-    po::notify(vm);
-    
-    po::parsed_options parsed_file = po::command_line_parser(all.options_from_file_argc,all.options_from_file_argv).
-      style(po::command_line_style::default_style ^ po::command_line_style::allow_guessing).
-      options(desc).allow_unregistered().run();
-    po::store(parsed_file, vm_file);
-    po::notify(vm_file);
-    
-    if( vm_file.count("cbify") ) {
-      data->k = (uint32_t)vm_file["cbify"].as<size_t>();
-      if( vm.count("cbify") && (uint32_t)vm["cbify"].as<size_t>() != data->k )
-        std::cerr << "warning: you specified a different number of actions through --cbify than the one loaded from predictor. Pursuing with loaded value of: " << data->k << endl;
+    if (wc.class_index == final_prediction)
+    {
+      cost = wc.x;
+      break;
     }
-    else {
-      data->k = (uint32_t)vm["cbify"].as<size_t>();
-      
-      //appends nb_actions to options_from_file so it is saved to regressor later
-      std::stringstream ss;
-      ss << " --cbify " << data->k;
-      all.options_from_file.append(ss.str());
+  }
+  return data.loss0 + (data.loss1 - data.loss0) * cost;
+}
+
+float loss_csldf(cbify& data, std::vector<v_array<COST_SENSITIVE::wclass>>& cs_costs, uint32_t final_prediction)
+{
+  float cost = 0.;
+  for (auto costs : cs_costs)
+  {
+    if (costs[0].class_index == final_prediction)
+    {
+      cost = costs[0].x;
+      break;
+    }
+  }
+  return data.loss0 + (data.loss1 - data.loss0) * cost;
+}
+
+template <class T>
+inline void delete_it(T* p)
+{
+  if (p != nullptr)
+    delete p;
+}
+
+void finish(cbify& data)
+{
+  CB::cb_label.delete_label(&data.cb_label);
+  data.a_s.delete_v();
+
+  if (data.use_adf)
+  {
+    for (size_t a = 0; a < data.adf_data.num_actions; ++a)
+    {
+      data.adf_data.ecs[a]->pred.a_s.delete_v();
+      VW::dealloc_example(CB::cb_label.delete_label, *data.adf_data.ecs[a]);
+      free_it(data.adf_data.ecs[a]);
+    }
+    data.adf_data.ecs.~vector<example*>();
+    data.cs_costs.~vector<v_array<COST_SENSITIVE::wclass>>();
+    data.cb_costs.~vector<v_array<CB::cb_class>>();
+    for (auto as : data.cb_as) as.delete_v();
+    data.cb_as.~vector<ACTION_SCORE::action_scores>();
+  }
+}
+
+void copy_example_to_adf(cbify& data, example& ec)
+{
+  auto& adf_data = data.adf_data;
+  const uint64_t ss = data.all->weights.stride_shift();
+  const uint64_t mask = data.all->weights.mask();
+
+  for (size_t a = 0; a < adf_data.num_actions; ++a)
+  {
+    auto& eca = *adf_data.ecs[a];
+    // clear label
+    auto& lab = eca.l.cb;
+    CB::cb_label.default_label(&lab);
+
+    // copy data
+    VW::copy_example_data(false, &eca, &ec);
+
+    // offset indicies for given action
+    for (features& fs : eca)
+    {
+      for (feature_index& idx : fs.indicies)
+      {
+        idx = ((((idx >> ss) * 28904713) + 4832917 * (uint64_t)a) << ss) & mask;
+      }
     }
 
-    all.p->lp = OAA::mc_label_parser;
-    learner* l;
-    if (vm.count("cover"))
-      {
-	data->bags = (uint32_t)vm["cover"].as<size_t>();
-	data->cs = all.cost_sensitive;
-	data->count.resize(data->k);
-	data->predictions.resize(data->bags);
-	data->second_cs_label.costs.resize(data->k);
-	data->second_cs_label.costs.end = data->second_cs_label.costs.begin+data->k;
-	if ( vm.count("epsilon") ) 
-	  data->epsilon = vm["epsilon"].as<float>();
-	l = new learner(data, all.l, data->bags + 1);
-	l->set_learn<cbify, predict_or_learn_cover<true> >();
-	l->set_predict<cbify, predict_or_learn_cover<false> >();
-      }
-    else if (vm.count("bag"))
-      {
-	data->bags = (uint32_t)vm["bag"].as<size_t>();
-	data->count.resize(data->bags+1);
-	l = new learner(data, all.l, data->bags);
-	l->set_learn<cbify, predict_or_learn_bag<true> >();
-	l->set_predict<cbify, predict_or_learn_bag<false> >();
-      }
-    else if (vm.count("first") )
-      {
-	data->tau = (uint32_t)vm["first"].as<size_t>();
-	l = new learner(data, all.l, 1);
-	l->set_learn<cbify, predict_or_learn_first<true> >();
-	l->set_predict<cbify, predict_or_learn_first<false> >();
-      }
-    else
-      {
-	if ( vm.count("epsilon") ) 
-	  data->epsilon = vm["epsilon"].as<float>();
-	l = new learner(data, all.l, 1);
-	l->set_learn<cbify, predict_or_learn_greedy<true> >();
-	l->set_predict<cbify, predict_or_learn_greedy<false> >();
-      }
-
-    l->set_finish_example<cbify,finish_example>();
-    l->set_init_driver<cbify,init_driver>();
-    
-    return l;
+    // avoid empty example by adding a tag (hacky)
+    if (CB_ALGS::example_is_newline_not_header(eca) && CB::cb_label.test_label(&eca.l))
+    {
+      eca.tag.push_back('n');
+    }
   }
+}
+
+template <bool is_learn, bool use_cs>
+void predict_or_learn(cbify& data, single_learner& base, example& ec)
+{
+  // Store the multiclass or cost-sensitive input label
+  MULTICLASS::label_t ld;
+  COST_SENSITIVE::label csl;
+  if (use_cs)
+    csl = ec.l.cs;
+  else
+    ld = ec.l.multi;
+
+  data.cb_label.costs.clear();
+  ec.l.cb = data.cb_label;
+  ec.pred.a_s = data.a_s;
+
+  // Call the cb_explore algorithm. It returns a vector of probabilities for each action
+  base.predict(ec);
+  // data.probs = ec.pred.scalars;
+
+  uint32_t chosen_action;
+  if (sample_after_normalizing(
+          data.app_seed + data.example_counter++, begin_scores(ec.pred.a_s), end_scores(ec.pred.a_s), chosen_action))
+    THROW("Failed to sample from pdf");
+
+  CB::cb_class cl;
+  cl.action = chosen_action + 1;
+  cl.probability = ec.pred.a_s[chosen_action].score;
+
+  if (!cl.action)
+    THROW("No action with non-zero probability found!");
+  if (use_cs)
+    cl.cost = loss_cs(data, csl.costs, cl.action);
+  else
+    cl.cost = loss(data, ld.label, cl.action);
+
+  // Create a new cb label
+  data.cb_label.costs.push_back(cl);
+  ec.l.cb = data.cb_label;
+
+  if (is_learn)
+    base.learn(ec);
+
+  data.a_s.clear();
+  data.a_s = ec.pred.a_s;
+
+  if (use_cs)
+    ec.l.cs = csl;
+  else
+    ec.l.multi = ld;
+
+  ec.pred.multiclass = cl.action;
+}
+
+template <bool is_learn, bool use_cs>
+void predict_or_learn_adf(cbify& data, multi_learner& base, example& ec)
+{
+  // Store the multiclass or cost-sensitive input label
+  MULTICLASS::label_t ld;
+  COST_SENSITIVE::label csl;
+  if (use_cs)
+    csl = ec.l.cs;
+  else
+    ld = ec.l.multi;
+
+  copy_example_to_adf(data, ec);
+  base.predict(data.adf_data.ecs);
+
+  auto& out_ec = *data.adf_data.ecs[0];
+
+  uint32_t chosen_action;
+  if (sample_after_normalizing(data.app_seed + data.example_counter++, begin_scores(out_ec.pred.a_s),
+          end_scores(out_ec.pred.a_s), chosen_action))
+    THROW("Failed to sample from pdf");
+
+  CB::cb_class cl;
+  cl.action = out_ec.pred.a_s[chosen_action].action + 1;
+  cl.probability = out_ec.pred.a_s[chosen_action].score;
+
+  if (!cl.action)
+    THROW("No action with non-zero probability found!");
+
+  if (use_cs)
+    cl.cost = loss_cs(data, csl.costs, cl.action);
+  else
+    cl.cost = loss(data, ld.label, cl.action);
+
+  // add cb label to chosen action
+  auto& lab = data.adf_data.ecs[cl.action - 1]->l.cb;
+  lab.costs.clear();
+  lab.costs.push_back(cl);
+
+  if (is_learn)
+    base.learn(data.adf_data.ecs);
+
+  ec.pred.multiclass = cl.action;
+}
+
+void init_adf_data(cbify& data, const size_t num_actions)
+{
+  auto& adf_data = data.adf_data;
+  adf_data.num_actions = num_actions;
+
+  adf_data.ecs.resize(num_actions);
+  for (size_t a = 0; a < num_actions; ++a)
+  {
+    adf_data.ecs[a] = VW::alloc_examples(CB::cb_label.label_size, 1);
+    auto& lab = adf_data.ecs[a]->l.cb;
+    CB::cb_label.default_label(&lab);
+  }
+}
+
+template <bool is_learn>
+void do_actual_learning_ldf(cbify& data, multi_learner& base, multi_ex& ec_seq)
+{
+  // change label and pred data for cb
+  if (data.cs_costs.size() < ec_seq.size())
+    data.cs_costs.resize(ec_seq.size());
+  if (data.cb_costs.size() < ec_seq.size())
+    data.cb_costs.resize(ec_seq.size());
+  if (data.cb_as.size() < ec_seq.size())
+    data.cb_as.resize(ec_seq.size());
+  for (size_t i = 0; i < ec_seq.size(); ++i)
+  {
+    auto& ec = *ec_seq[i];
+    data.cs_costs[i] = ec.l.cs.costs;
+    data.cb_costs[i].clear();
+    data.cb_as[i].clear();
+    ec.l.cb.costs = data.cb_costs[i];
+    ec.pred.a_s = data.cb_as[i];
+  }
+
+  base.predict(ec_seq);
+
+  auto& out_ec = *ec_seq[0];
+
+  uint32_t chosen_action;
+  if (sample_after_normalizing(data.app_seed + data.example_counter++, begin_scores(out_ec.pred.a_s),
+          end_scores(out_ec.pred.a_s), chosen_action))
+    THROW("Failed to sample from pdf");
+
+  CB::cb_class cl;
+  cl.action = out_ec.pred.a_s[chosen_action].action + 1;
+  cl.probability = out_ec.pred.a_s[chosen_action].score;
+
+  if (!cl.action)
+    THROW("No action with non-zero probability found!");
+
+  cl.cost = loss_csldf(data, data.cs_costs, cl.action);
+
+  // add cb label to chosen action
+  data.cb_label.costs.clear();
+  data.cb_label.costs.push_back(cl);
+  data.cb_costs[cl.action - 1] = ec_seq[cl.action - 1]->l.cb.costs;
+  ec_seq[cl.action - 1]->l.cb = data.cb_label;
+
+  base.learn(ec_seq);
+
+  // set cs prediction and reset cs costs
+  for (size_t i = 0; i < ec_seq.size(); ++i)
+  {
+    auto& ec = *ec_seq[i];
+    data.cb_as[i] = ec.pred.a_s;  // store action_score vector for later reuse.
+    if (i == cl.action - 1)
+      data.cb_label = ec.l.cb;
+    else
+      data.cb_costs[i] = ec.l.cb.costs;
+    ec.l.cs.costs = data.cs_costs[i];
+    if (i == cl.action - 1)
+      ec.pred.multiclass = cl.action;
+    else
+      ec.pred.multiclass = 0;
+  }
+}
+
+void output_example(vw& all, example& ec, bool& hit_loss, multi_ex* ec_seq)
+{
+  COST_SENSITIVE::label& ld = ec.l.cs;
+  v_array<COST_SENSITIVE::wclass> costs = ld.costs;
+
+  if (example_is_newline(ec))
+    return;
+  if (COST_SENSITIVE::ec_is_example_header(ec))
+    return;
+
+  all.sd->total_features += ec.num_features;
+
+  float loss = 0.;
+
+  uint32_t predicted_class = ec.pred.multiclass;
+
+  if (!COST_SENSITIVE::cs_label.test_label(&ec.l))
+  {
+    for (size_t j = 0; j < costs.size(); j++)
+    {
+      if (hit_loss)
+        break;
+      if (predicted_class == costs[j].class_index)
+      {
+        loss = costs[j].x;
+        hit_loss = true;
+      }
+    }
+
+    all.sd->sum_loss += loss;
+    all.sd->sum_loss_since_last_dump += loss;
+  }
+
+  for (int sink : all.final_prediction_sink) all.print(sink, (float)ec.pred.multiclass, 0, ec.tag);
+
+  if (all.raw_prediction > 0)
+  {
+    string outputString;
+    stringstream outputStringStream(outputString);
+    for (size_t i = 0; i < costs.size(); i++)
+    {
+      if (i > 0)
+        outputStringStream << ' ';
+      outputStringStream << costs[i].class_index << ':' << costs[i].partial_prediction;
+    }
+    // outputStringStream << endl;
+    all.print_text(all.raw_prediction, outputStringStream.str(), ec.tag);
+  }
+
+  COST_SENSITIVE::print_update(all, COST_SENSITIVE::cs_label.test_label(&ec.l), ec, ec_seq, false, predicted_class);
+}
+
+void output_example_seq(vw& all, multi_ex& ec_seq)
+{
+  if (ec_seq.size() == 0)
+    return;
+  all.sd->weighted_labeled_examples += ec_seq[0]->weight;
+  all.sd->example_number++;
+
+  bool hit_loss = false;
+  for (example* ec : ec_seq) output_example(all, *ec, hit_loss, &(ec_seq));
+
+  if (all.raw_prediction > 0)
+  {
+    v_array<char> empty = {nullptr, nullptr, nullptr, 0};
+    all.print_text(all.raw_prediction, "", empty);
+  }
+}
+
+void finish_multiline_example(vw& all, cbify&, multi_ex& ec_seq)
+{
+  if (ec_seq.size() > 0)
+  {
+    output_example_seq(all, ec_seq);
+    // global_print_newline(all);
+  }
+  VW::clear_seq_and_finish_examples(all, ec_seq);
+}
+
+base_learner* cbify_setup(options_i& options, vw& all)
+{
+  uint32_t num_actions = 0;
+  auto data = scoped_calloc_or_throw<cbify>();
+  bool use_cs;
+
+  option_group_definition new_options("Make Multiclass into Contextual Bandit");
+  new_options
+      .add(make_option("cbify", num_actions)
+               .keep()
+               .help("Convert multiclass on <k> classes into a contextual bandit problem"))
+      .add(make_option("cbify_cs", use_cs).help("consume cost-sensitive classification examples instead of multiclass"))
+      .add(make_option("loss0", data->loss0).default_value(0.f).help("loss for correct label"))
+      .add(make_option("loss1", data->loss1).default_value(1.f).help("loss for incorrect label"));
+  options.add_and_parse(new_options);
+
+  if (!options.was_supplied("cbify"))
+    return nullptr;
+
+  data->use_adf = options.was_supplied("cb_explore_adf");
+  data->app_seed = uniform_hash("vw", 2, 0);
+  data->a_s = v_init<action_score>();
+  data->all = &all;
+
+  if (data->use_adf)
+    init_adf_data(*data.get(), num_actions);
+
+  if (!options.was_supplied("cb_explore") && !data->use_adf)
+  {
+    stringstream ss;
+    ss << num_actions;
+    options.insert("cb_explore", ss.str());
+  }
+
+  if (data->use_adf)
+  {
+    options.insert("cb_min_cost", to_string(data->loss0));
+    options.insert("cb_max_cost", to_string(data->loss1));
+  }
+
+  if (options.was_supplied("baseline"))
+  {
+    stringstream ss;
+    ss << max<float>(abs(data->loss0), abs(data->loss1)) / (data->loss1 - data->loss0);
+    options.insert("lr_multiplier", ss.str());
+  }
+
+  learner<cbify, example>* l;
+
+  if (data->use_adf)
+  {
+    multi_learner* base = as_multiline(setup_base(options, all));
+    if (use_cs)
+      l = &init_cost_sensitive_learner(
+          data, base, predict_or_learn_adf<true, true>, predict_or_learn_adf<false, true>, all.p, 1);
+    else
+      l = &init_multiclass_learner(
+          data, base, predict_or_learn_adf<true, false>, predict_or_learn_adf<false, false>, all.p, 1);
+  }
+  else
+  {
+    single_learner* base = as_singleline(setup_base(options, all));
+    if (use_cs)
+      l = &init_cost_sensitive_learner(
+          data, base, predict_or_learn<true, true>, predict_or_learn<false, true>, all.p, 1);
+    else
+      l = &init_multiclass_learner(data, base, predict_or_learn<true, false>, predict_or_learn<false, false>, all.p, 1);
+  }
+  l->set_finish(finish);
+  all.delete_prediction = nullptr;
+
+  return make_base(*l);
+}
+
+base_learner* cbifyldf_setup(options_i& options, vw& all)
+{
+  auto data = scoped_calloc_or_throw<cbify>();
+  bool cbify_ldf_option = false;
+
+  option_group_definition new_options("Make csoaa_ldf into Contextual Bandit");
+  new_options
+      .add(make_option("cbify_ldf", cbify_ldf_option).keep().help("Convert csoaa_ldf into a contextual bandit problem"))
+      .add(make_option("loss0", data->loss0).default_value(0.f).help("loss for correct label"))
+      .add(make_option("loss1", data->loss1).default_value(1.f).help("loss for incorrect label"));
+  options.add_and_parse(new_options);
+
+  if (!options.was_supplied("cbify_ldf"))
+    return nullptr;
+
+  data->app_seed = uniform_hash("vw", 2, 0);
+  data->all = &all;
+  data->use_adf = true;
+
+  if (!options.was_supplied("cb_explore_adf"))
+  {
+    options.insert("cb_explore_adf", "");
+  }
+  options.insert("cb_min_cost", to_string(data->loss0));
+  options.insert("cb_max_cost", to_string(data->loss1));
+
+  if (options.was_supplied("baseline"))
+  {
+    stringstream ss;
+    ss << max<float>(abs(data->loss0), abs(data->loss1)) / (data->loss1 - data->loss0);
+    options.insert("lr_multiplier", ss.str());
+  }
+
+  multi_learner* base = as_multiline(setup_base(options, all));
+  learner<cbify, multi_ex>& l = init_learner(
+      data, base, do_actual_learning_ldf<true>, do_actual_learning_ldf<false>, 1, prediction_type::multiclass);
+
+  l.set_finish(finish);
+  l.set_finish_example(finish_multiline_example);
+  all.p->lp = COST_SENSITIVE::cs_label;
+  all.delete_prediction = nullptr;
+
+  return make_base(l);
 }

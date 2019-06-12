@@ -1,90 +1,85 @@
-CXX = $(shell which clang++)
-ifneq ($(CXX),)
-$(warning Using clang: "$(CXX)")
-ARCH = -D__extern_always_inline=inline
-else
-CXX = g++
-$(warning Using g++)
-ARCH = $(shell test `g++ -v 2>&1 | tail -1 | cut -d ' ' -f 3 | cut -d '.' -f 1,2` \< 4.3 && echo -march=nocona || echo -march=native)
-endif
+default: vw
+all: vw library_example java spanning_tree python
 
-ifeq ($(CXX),)
-$(waninng No compiler found)
-exit 1
-endif
+# CMake configs
+ensure_cmake:
+	mkdir -p build
+	cd build; cmake ..
 
-UNAME := $(shell uname)
-LIBS = -l boost_program_options -l pthread -l z
-BOOST_INCLUDE = /usr/include
-BOOST_LIBRARY = /usr/lib
+ensure_cmake_gcov:
+	mkdir -p build
+	cd build; cmake .. -DGCOV=On
 
-ifeq ($(UNAME), FreeBSD)
-LIBS = -l boost_program_options	-l pthread -l z -l compat
-BOOST_INCLUDE = /usr/local/include
-endif
-ifeq "CYGWIN" "$(findstring CYGWIN,$(UNAME))"
-LIBS = -l boost_program_options-mt -l pthread -l z
-BOOST_INCLUDE = /usr/include
-endif
-ifeq ($(UNAME), Darwin)
-LIBS = -lboost_program_options-mt -lboost_serialization-mt -l pthread -l z
-BOOST_INCLUDE = /opt/local/include
-BOOST_LIBRARY = /opt/local/lib
-endif
+ensure_cmake_profile:
+	mkdir -p build
+	cd build; cmake .. -DPROFILE=On
 
+ensure_cmake_valgrind:
+	mkdir -p build
+	cd build; cmake .. -DVALGRIND_PROFILE=On
 
-#LIBS = -l boost_program_options-gcc34 -l pthread -l z
+ensure_cmake_static:
+	mkdir -p build
+	cd build; cmake .. -DSTATIC_LINK_VW=On
 
-OPTIM_FLAGS = -O3 -fomit-frame-pointer -fno-strict-aliasing -ffast-math #uncomment for speed, comment for testability
-ifeq ($(UNAME), FreeBSD)
+# Build targets
+spanning_tree_build:
+	cd build; make -j$(shell cat ./build/nprocs.txt) spanning_tree
 
-WARN_FLAGS = -Wall
-else
-WARN_FLAGS = -Wall -pedantic
-endif
+vw_build:
+	cd build; make -j$(shell cat ./build/nprocs.txt) vw-bin
 
-# for normal fast execution.
-FLAGS = $(ARCH) $(WARN_FLAGS) $(OPTIM_FLAGS) -D_FILE_OFFSET_BITS=64 -DNDEBUG -I $(BOOST_INCLUDE) #-DVW_LDA_NO_SSE
+active_interactor_build:
+	cd build; make -j$(shell cat ./build/nprocs.txt) active_interactor
 
-# for profiling
-#FLAGS = $(ARCH) $(WARN_FLAGS) -O3 -fno-strict-aliasing -ffast-math -D_FILE_OFFSET_BITS=64 -I $(BOOST_INCLUDE) -pg #-DVW_LDA_NO_SSE
+library_example_build:
+	cd build; make -j$(shell cat ./build/nprocs.txt) ezexample_predict ezexample_predict_threaded ezexample_train library_example test_search search_generate recommend gd_mf_weights
 
-# for valgrind
-#FLAGS = $(ARCH) $(WARN_FLAGS) -ffast-math -D_FILE_OFFSET_BITS=64 -I $(BOOST_INCLUDE) -g -O0
+python_build:
+	cd build; make -j$(shell cat ./build/nprocs.txt) pylibvw
 
-# for valgrind profiling: run 'valgrind --tool=callgrind PROGRAM' then 'callgrind_annotate --tree=both --inclusive=yes'
-#FLAGS = -Wall $(ARCH) -ffast-math -D_FILE_OFFSET_BITS=64 -I $(BOOST_INCLUDE) -g -O3 -fomit-frame-pointer -ffast-math -fno-strict-aliasing
+java_build:
+	cd build; make -j$(shell cat ./build/nprocs.txt) vw_jni
 
-BINARIES = vw active_interactor
-MANPAGES = vw.1
-
-all:	vw spanning_tree library_example
-
-%.1:	%
-	help2man --no-info --name="Vowpal Wabbit -- fast online learning tool" ./$< > $@
-
-export
-
-spanning_tree: 
-	cd cluster; $(MAKE)
-
-vw:
-	cd vowpalwabbit; $(MAKE) -j 8 things
-
-active_interactor:
-	cd vowpalwabbit; $(MAKE)
-
-library_example: vw
-	cd library; $(MAKE) -j 8
-
-.FORCE:
-
-test: .FORCE
+test_build:
 	@echo "vw running test-suite..."
-	(cd test && ./RunTests -d -fe -E 0.001 ../vowpalwabbit/vw ../vowpalwabbit/vw)
+	cd build; make -j$(shell cat ./build/nprocs.txt) test_with_output
 
-install: $(BINARIES)
-	cd vowpalwabbit; cp $(BINARIES) /usr/local/bin; cd ../cluster; $(MAKE) install
+unit_test_build:
+	cd build/test/unit_test; make -j$(shell cat ./build/nprocs.txt) vw-unit-test.out test
+
+bigtests_build:
+	cd build; make -j$(shell cat ./build/nprocs.txt) bigtests BIG_TEST_ARGS="$(MAKEFLAGS)"
+
+install_build:
+	cd build; make -j$(shell cat ./build/nprocs.txt) install
+
+doc_build:
+	cd build; make doc
+
+# These can be invoked with [gcov, valgrind, profile, static]
+spanning_tree_%: ensure_cmake_% spanning_tree_build ;
+vw_%: ensure_cmake_% vw_build ;
+active_interactor_%: ensure_cmake_% active_interactor_build ;
+library_example_%: ensure_cmake_% library_example_build ;
+python_%: ensure_cmake_% python_build ;
+java_%: ensure_cmake_% java_build ;
+test_%: ensure_cmake_% test_build ;
+unit_test_%: ensure_cmake_% unit_test_build ;
+bigtests_%: ensure_cmake_% bigtests_build ;
+install_%: ensure_cmake_% install_build ;
+
+# Normal build commands that use default configuration
+spanning_tree: ensure_cmake spanning_tree_build ;
+vw: ensure_cmake vw_build ;
+active_interactor: ensure_cmake active_interactor_build ;
+library_example: ensure_cmake library_example_build ;
+python: ensure_cmake python_build ;
+java: ensure_cmake java_build ;
+test: ensure_cmake test_build ;
+unit_test: ensure_cmake unit_test_build ;
+bigtests: ensure_cmake bigtests_build ;
+install: ensure_cmake install_build ;
 
 clean:
-	cd vowpalwabbit; $(MAKE) clean; cd ../cluster; $(MAKE) clean
+	rm -rf build

@@ -1,13 +1,24 @@
-#set internal version number in configure.ac before tagging.
-git branch $1
-git checkout $1
-./autogen.sh
-make
-cp LICENSE COPYING
-git add -f ltmain.sh acinclude.d/* aclocal.m4 config.guess missing install-sh config.sub depcomp COPYING Makefile.in configure config.status libtool vowpalwabbit/config.h.in vowpalwabbit/Makefile.in cluster/Makefile.in library/Makefile.in 
-rm Makefile vowpalwabbit/Makefile cluster/Makefile library/Makefile
-git commit -a -m "added autogen extra files"
+#!/bin/bash
+set -e
+set -x
+
+if [ "$#" -ne 1 ]; then
+    echo "Must supply version number: $0 new_version_number"
+    exit 1
+fi
+
+# Clean working directory
+git clean -fd .
+git checkout -- .
+
+# Run clang-format and commit
+./utl/clang-format fix
+git commit -a -m "Fix style with clang-format (before releasing $1)"
+
+# Update version number and commit
+echo "$1" > version.txt
+git commit -a -m "Update verson.txt for release $1"
+
+# Tag release commit and push
 git tag $1
-git checkout master
-git branch -D $1
-git push --tags
+git push origin $1

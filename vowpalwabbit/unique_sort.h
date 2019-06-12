@@ -3,11 +3,10 @@ Copyright (c) by respective owners including Yahoo!, Microsoft, and
 individual contributors. All rights reserved.  Released under a BSD
 license as described in the file LICENSE.
  */
-#ifndef UNIQUE_SORT
-#define UNIQUE_SORT
+#pragma once
 #include "parser.h"
 #include "example.h"
 
-void unique_sort_features(bool audit, example* ae);
+void unique_sort_features(uint64_t parse_mask, example* ae);
 
-#endif
+void unique_features(features& fs, int max = -1);

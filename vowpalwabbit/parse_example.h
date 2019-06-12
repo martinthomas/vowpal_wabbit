@@ -3,20 +3,29 @@ Copyright (c) by respective owners including Yahoo!, Microsoft, and
 individual contributors. All rights reserved.  Released under a BSD
 license as described in the file LICENSE.
  */
-#ifndef PE_H
-#define PE_H
+#pragma once
 #include <stdint.h>
-#include "parse_regressor.h"
 #include "parse_primitives.h"
-#include "parser.h"
 #include "example.h"
+#include "vw.h"
 
-//example processing
+// example processing
+typedef enum
+{
+  StringFeatures,
+  JsonFeatures
+} FeatureInputType;
 
-int read_features(void* a, example* ex);// read example from  preset buffers.
-void read_line(vw& all, example* ex, char* line);//read example from the line.
-size_t hashstring (substring s, uint32_t h);
+void substring_to_example(vw* all, example* ae, substring example);
 
-hash_func_t getHasher(const std::string& s);
+namespace VW
+{
+example& get_unused_example(vw* all);
+void read_line(vw& all, example* ex, char* line);  // read example from the line.
+void read_lines(vw* all, char* line, size_t len,
+    v_array<example*>& examples);  // read examples from the new line separated strings.
 
-#endif
+}  // namespace VW
+
+int read_features_string(vw* all, v_array<example*>& examples);
+size_t read_features(vw* all, char*& line, size_t& num_chars);
